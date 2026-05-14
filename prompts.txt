@@ -1,0 +1,103 @@
+#########################################
+# Prompt 1: Skeleton:
+#########################################
+I'm building an async Playwright scraper for ekantipur.com (Nepali news, Devanagari).
+Final output must be a single output.json file.
+
+Build the skeleton only (no extraction logic yet). Requirements:
+
+1. Use playwright.async_api (async_playwright). Not sync.
+2. Use pydantic v2 BaseModel for three models:
+   - Article: title (str), image_url (str), category (str), author (str | None)
+   - Cartoon: title (str), image_url (str), author (str | None)
+   - ScrapeResult: entertainment_news (list[Article]), cartoon_of_the_day (Cartoon),
+     and a top-level _meta dict with scraped_at (ISO 8601), source_url, scraper_version="1.0.0", articles_count
+3. Use Python's logging module, default INFO, timestamped formatter. No print().
+4. Set a real Chrome User-Agent on the browser context.
+5. main() should: launch chromium headless, create a context with the UA, open a page,
+   call two stub coroutines scrape_entertainment(page) and scrape_cartoon(page) that just
+   return empty placeholders for now, build the ScrapeResult, dump to output.json with
+   ensure_ascii=False and indent=2, close the browser.
+6. Refer the verified selector map at a top comment block (scraper.py), do not modify it.
+
+Output one complete scraper.py. No explanation outside the code.
+
+
+#########################################
+# Prompt 2: Entertainment:
+#########################################
+Extend scraper.py. Implement scrape_entertainment(page) to return list[Article] of the top 5 articles.
+
+Use this exact approach:
+1. await page.goto("https://ekantipur.com/entertainment", wait_until="domcontentloaded").
+2. await page.wait_for_selector("div.category-inner-wrapper", state="attached").
+3. Read the page-level category label once: text of ".category-name a" inside <header>.
+4. cards = await page.locator("div.category-inner-wrapper").all()
+5. Iterate the first 5 cards. For each card, in its own try/except:
+   - title: card.locator(".category-description h2 a").first.inner_text()
+   - article_url: same locator .get_attribute("href")
+   - author: collect all texts under ".author-name a" via .all_inner_texts(), join with ", ".
+     If empty list, author = None.
+   - image_url: card.locator(".category-image img").first.get_attribute("data-src")
+     IMPORTANT: data-src, not src. Images are lazy-loaded.
+   - Build Article(title, image_url, category=<page label>, author).
+6. On exception, log.warning with card index and exception; skip that card; do not crash.
+7. Return the list.
+
+Do not run any extraction code yet on cartoons. Do not modify any other function. Show only the new/changed code.
+
+
+#########################################
+# Prompt 3: Cartoon:
+#########################################
+Extend scraper.py. Implement scrape_cartoon(page) to return a Cartoon.
+
+Approach:
+1. await page.goto("https://ekantipur.com/cartoon", wait_until="domcontentloaded").
+2. await page.wait_for_selector("div.cartoon-wrapper", state="attached").
+3. first = page.locator("div.cartoon-wrapper").first
+4. image_url: prefer first.locator(".cartoon-image figure a").first.get_attribute("href"),
+   because that href is the direct full-res JPG link (fancybox).
+   If that fails, fall back to first.locator(".cartoon-image img").first.get_attribute("data-src").
+5. title: first.locator(".cartoon-description p").first.inner_text().
+   Strip whitespace. Strip a trailing " - " or "-" with surrounding spaces if present.
+6. author: set to None. Add an inline code comment saying:
+   "The cartoonist (Abin Shrestha, series 'गजब छ बा') is not present in the DOM,
+    image EXIF, or XMP metadata. Returning None per the assignment's null-when-missing pattern."
+7. Wrap the whole function body in one try/except. On failure, log.error and return
+   Cartoon(title="", image_url="", author=None) so the JSON still validates.
+
+Do not modify scrape_entertainment. Show only the new function.
+
+
+#########################################
+# Prompt 4: Enrichment:
+#########################################
+Extend scraper.py with two improvements.
+
+(A) Add a helper unwrap_cdn_url(url: str) -> str:
+- If url starts with "https://assets-cdn-api.ekantipur.com/thumb.php",
+  parse it with urllib.parse, return the "src" query param if present.
+- Otherwise return the url unchanged.
+
+Apply unwrap_cdn_url to every image_url in scrape_entertainment and scrape_cartoon
+before constructing the model.
+
+(B) Add an async function enrich_from_jsonld(context, article_url: str) -> dict:
+- Open a new page in the same context.
+- Goto article_url, wait_until="domcontentloaded".
+- Get the text of the first script[type='application/ld+json'].
+- json.loads it. If @type == "NewsArticle", return a dict with optional keys:
+    canonical_author = data.get("author", {}).get("name")
+    full_image       = data["image"][0] if data.get("image") else None
+    published_at     = data.get("datePublished")
+- Close the page. On any error, log.debug and return {}.
+
+In scrape_entertainment, after collecting the 5 listing-level Articles, run
+enrich_from_jsonld concurrently for all 5 article_urls using
+asyncio.gather with an asyncio.Semaphore(3) wrapper so at most 3 detail pages
+are in flight. Merge: if canonical_author non-empty, overwrite author.
+If full_image non-empty, overwrite image_url. Do NOT add new fields to Article
+(keep the assignment's required schema clean).
+
+Show only the helper, the enrich function, and the modified portion of scrape_entertainment.
